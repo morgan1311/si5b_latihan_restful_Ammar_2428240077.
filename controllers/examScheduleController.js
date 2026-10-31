@@ -1,117 +1,184 @@
-// controllers/examScheduleController.js
-const ExamScheduleModel = require('../models/examScheduleModel');
+const ExamSchedule = require('../models/examScheduleModel');
 
 const ExamScheduleController = {
-  // GET /exam-schedules dan filter ?ruang=nilai
-  getAll: (req, res) => {
-    const { ruang } = req.query;
-    const data = ExamScheduleModel.findAll(ruang);
-    // Response GET mengembalikan array data langsung (status 200)
-    return res.status(200).json(data);
+  // GET /exam-schedules dengan Advanced Query
+  getAll: async (req, res) => {
+    try {
+      // 1. FILTERING
+      const queryObj = { ...req.query };
+      const excludedFields = ['page', 'sort', 'limit', 'fields'];
+      excludedFields.forEach((el) => delete queryObj[el]);
+
+      // Filter khusus jika ada query 'ruang' (pencarian ke field embedded ruang.nama)
+      if (queryObj.ruang) {
+        queryObj['ruang.nama'] = { $regex: queryObj.ruang, $options: 'i' };
+        delete queryObj.ruang;
+      }
+
+      // Filter pencarian teks mataKuliah (opsional, jika ada)
+      if (queryObj.mataKuliah) {
+        queryObj.mataKuliah = { $regex: queryObj.mataKuliah, $options: 'i' };
+      }
+
+      let query = ExamSchedule.find(queryObj);
+
+      // 2. SORTING (contoh: ?sort=tanggal,-jamMulai)
+      if (req.query.sort) {
+        const sortBy = req.query.sort.split(',').join(' ');
+        query = query.sort(sortBy);
+      } else {
+        query = query.sort('-createdAt'); // Default sort terbaru
+      }
+
+      // 3. FIELD PROJECTION (contoh: ?fields=mataKuliah,tanggal,ruang)
+      if (req.query.fields) {
+        const fields = req.query.fields.split(',').join(' ');
+        query = query.select(fields);
+      } else {
+        query = query.select('-__v'); // Sembunyikan version key bawaan mongo
+      }
+
+      // 4. PAGINATION (contoh: ?page=1&limit=5)
+      const page = parseInt(req.query.page, 10) || 1;
+      const limit = parseInt(req.query.limit, 10) || 10;
+      const skip = (page - 1) * limit;
+
+      const totalData = await ExamSchedule.countDocuments(queryObj);
+      const totalPages = Math.ceil(totalData / limit);
+
+      // 5. REFERENCING POPULATE & EKSEKUSI
+      query = query.skip(skip).limit(limit).populate('pengawas', 'nama nip kontak');
+
+      const data = await query;
+
+      return res.status(200).json({
+        status: 'success',
+        pagination: {
+          totalData,
+          totalPages,
+          currentPage: page,
+          limit
+        },
+        data
+      });
+    } catch (error) {
+      return res.status(500).json({
+        status: 'error',
+        message: error.message,
+        data: null
+      });
+    }
   },
 
   // GET /exam-schedules/:id
-  getById: (req, res) => {
-    const id = parseInt(req.params.id);
-    const data = ExamScheduleModel.findById(id);
-
-    if (!data) {
-      return res.status(404).json({
-        status: "error",
-        message: `Data dengan id ${id} tidak ditemukan`,
+  getById: async (req, res) => {
+    try {
+      const data = await ExamSchedule.findById(req.params.id).populate('pengawas', 'nama nip kontak');
+      if (!data) {
+        return res.status(404).json({
+          status: 'error',
+          message: `Data dengan id ${req.params.id} tidak ditemukan`,
+          data: null
+        });
+      }
+      return res.status(200).json(data);
+    } catch (error) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Format ID tidak valid atau terjadi kesalahan',
         data: null
       });
     }
-
-    // Response GET satu data mengembalikan objek langsung (status 200)
-    return res.status(200).json(data);
   },
 
   // POST /exam-schedules
-  create: (req, res) => {
-    const { mataKuliah, tanggal, jamMulai, ruang, pengawas } = req.body;
+  create: async (req, res) => {
+    try {
+      const { mataKuliah, tanggal, jamMulai, ruang, pengawas } = req.body;
 
-    // Validasi field wajib (*)
-    if (!mataKuliah || !tanggal || !jamMulai || !ruang) {
+      // Bentuk data ruang (Embedded)
+      const dataRuang = typeof ruang === 'string' ? { nama: ruang } : ruang;
+
+      const baru = await ExamSchedule.create({
+        mataKuliah,
+        tanggal,
+        jamMulai,
+        ruang: dataRuang,
+        pengawas: pengawas || null
+      });
+
+      return res.status(201).json({
+        status: 'success',
+        message: 'Data berhasil ditambahkan',
+        data: baru
+      });
+    } catch (error) {
       return res.status(400).json({
-        status: "error",
-        message: "Field mataKuliah, tanggal, jamMulai, dan ruang wajib diisi",
+        status: 'error',
+        message: error.message,
         data: null
       });
     }
-
-    const baru = ExamScheduleModel.create({
-      mataKuliah,
-      tanggal,
-      jamMulai,
-      ruang,
-      pengawas
-    });
-
-    return res.status(201).json({
-      status: "success",
-      message: "Data berhasil ditambahkan",
-      data: baru
-    });
   },
 
   // PUT /exam-schedules/:id
-  update: (req, res) => {
-    const id = parseInt(req.params.id);
-    const { mataKuliah, tanggal, jamMulai, ruang, pengawas } = req.body;
+  update: async (req, res) => {
+    try {
+      const { mataKuliah, tanggal, jamMulai, ruang, pengawas } = req.body;
+      const dataRuang = typeof ruang === 'string' ? { nama: ruang } : ruang;
 
-    // Cek keberadaan data terlebih dahulu
-    const existing = ExamScheduleModel.findById(id);
-    if (!existing) {
-      return res.status(404).json({
-        status: "error",
-        message: `Data dengan id ${id} tidak ditemukan`,
-        data: null
+      const updated = await ExamSchedule.findByIdAndUpdate(
+        req.params.id,
+        { mataKuliah, tanggal, jamMulai, ruang: dataRuang, pengawas },
+        { new: true, runValidators: true }
+      );
+
+      if (!updated) {
+        return res.status(404).json({
+          status: 'error',
+          message: `Data dengan id ${req.params.id} tidak ditemukan`,
+          data: null
+        });
+      }
+
+      return res.status(200).json({
+        status: 'success',
+        message: 'Data berhasil diperbarui',
+        data: updated
       });
-    }
-
-    // Validasi seluruh field wajib (penggantian penuh)
-    if (!mataKuliah || !tanggal || !jamMulai || !ruang) {
+    } catch (error) {
       return res.status(400).json({
-        status: "error",
-        message: "Field mataKuliah, tanggal, jamMulai, dan ruang wajib diisi",
+        status: 'error',
+        message: error.message,
         data: null
       });
     }
-
-    const updated = ExamScheduleModel.update(id, {
-      mataKuliah,
-      tanggal,
-      jamMulai,
-      ruang,
-      pengawas
-    });
-
-    return res.status(200).json({
-      status: "success",
-      message: "Data berhasil diperbarui",
-      data: updated
-    });
   },
 
   // DELETE /exam-schedules/:id
-  delete: (req, res) => {
-    const id = parseInt(req.params.id);
-    const berhasil = ExamScheduleModel.delete(id);
+  delete: async (req, res) => {
+    try {
+      const deleted = await ExamSchedule.findByIdAndDelete(req.params.id);
+      if (!deleted) {
+        return res.status(404).json({
+          status: 'error',
+          message: `Data dengan id ${req.params.id} tidak ditemukan`,
+          data: null
+        });
+      }
 
-    if (!berhasil) {
-      return res.status(404).json({
-        status: "error",
-        message: `Data dengan id ${id} tidak ditemukan`,
+      return res.status(200).json({
+        status: 'success',
+        message: `Data jadwal ujian dengan id ${req.params.id} berhasil dihapus`,
+        data: null
+      });
+    } catch (error) {
+      return res.status(400).json({
+        status: 'error',
+        message: error.message,
         data: null
       });
     }
-
-    return res.status(200).json({
-      status: "success",
-      message: `Data jadwal ujian dengan id ${id} berhasil dihapus`,
-      data: null
-    });
   }
 };
 
